@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 环境变量
+.env
+
+# 数据目录
+chroma_data/
+uploads/
+.dexter/
+
+# IDE
+.vscode/
+.idea/
+
+# 系统
+Thumbs.db
+.DS_Store
+
+# 构建产物
+dist/
+build/
+*.egg
+*.whl
+
+# 排除参考项目
+dexter-main/
+OpenBB-develop/
