@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>财报分析 - AI 财报智审助手</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
+<script src="/static/js/main.js"></script>
+<script src="/static/js/chat.js"></script>
+<style>
+.chat-layout { display: flex; flex-direction: column; height: calc(100vh - 80px); }
+.chat-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+.chat-toolbar .title { font-size: 14px; font-weight: 500; }
+.chat-toolbar .title .hash { font-family: monospace; color: var(--text-muted); }
+.chat-toolbar .actions { display: flex; gap: 8px; }
+.chat-messages { flex: 1; overflow-y: auto; padding: 8px 0; }
+.chat-input-bar { margin-top: 8px; }
+.chat-message .content { white-space: pre-wrap; }
+.chart-container iframe { width: 100%; height: 380px; border: none; }
+.empty-chat { text-align: center; color: var(--text-muted); padding: 60px 20px; }
+.empty-chat .icon { font-size: 48px; margin-bottom: 12px; }
+.empty-chat h3 { font-weight: 600; margin-bottom: 8px; color: var(--text); }
+.empty-chat p { font-size: 14px; }
+.empty-chat .examples { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.empty-chat .examples button { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 6px 14px; font-size: 13px; cursor: pointer; color: var(--text-muted); transition: all 0.15s; }
+.empty-chat .examples button:hover { border-color: var(--primary); color: var(--primary); }
+</style>
+</head>
+<body>
+<div class="app-container">
+  <header class="app-header">
+    <a href="/" class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12h6"/><path d="M12 9v6"/><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+      <h1>财报智审</h1>
+    </a>
+    <nav>
+      <a href="/">首页</a>
+      <a href="/settings">设置</a>
+    </nav>
+  </header>
+  <input type="hidden" id="doc-hash" value="{{ doc_hash }}">
+  <main class="app-main chat-layout">
+    <div class="chat-toolbar">
+      <div class="title">📄 财报分析 <span class="hash">{{ doc_hash }}</span></div>
+      <div class="actions">
+        <button class="btn btn-sm" onclick="downloadReport()">📥 导出报告</button>
+        <button class="btn btn-sm" onclick="lockSession()">📌 锁定会话</button>
+        <button class="btn btn-sm" onclick="clearChat()">🗑️ 清除对话</button>
+        <a href="/" class="btn btn-sm">← 返回首页</a>
+      </div>
+    </div>
+    <div id="messages" class="chat-messages">
+      <div class="empty-chat">
+        <div class="icon">💬</div>
+        <h3>开始分析财报</h3>
+        <p>输入你的问题，AI 将基于 PDF 内容回答。</p>
+        <div class="examples">
+          <button onclick="quickQuestion('2023年营收是多少？')">2023年营收是多少？</button>
+          <button onclick="quickQuestion('净利润趋势如何？')">净利润趋势如何？</button>
+          <button onclick="quickQuestion('毛利率是多少？')">毛利率是多少？</button>
+          <button onclick="quickQuestion('画个营收柱状图')">画个营收柱状图</button>
+        </div>
+      </div>
+    </div>
+    <div id="chat-alert" style="margin-bottom:4px;"></div>
+    <div class="chat-input-bar">
+      <input type="text" id="question-input" class="input" placeholder="输入你的财务问题，按 Enter 发送..." autofocus>
+      <button id="send-btn" class="btn btn-primary">发送</button>
+    </div>
+  </main>
+</div>
+<script>
+function quickQuestion(q) {
+  $("#question-input").val(q);
+  sendMessage();
+}
+function lockSession() {
+  const messages = getSession("chat_messages", []);
+  if (!messages.length) { alert("当前没有可锁定的会话内容。"); return; }
+  const snapshots = getStorage("session_snapshots", []);
+  if (snapshots.length >= 3) { alert("最多保存 3 个快照。请先删除旧快照。"); return; }
+  snapshots.push({
+    title: "快照 " + new Date().toLocaleString("zh-CN"),
+    messages: messages,
+    doc_hash: $("#doc-hash").val(),
+    created_at: new Date().toISOString(),
+  });
+  setStorage("session_snapshots", snapshots);
+  showAlert("chat-alert", "success", "会话已锁定，可在首页恢复");
+}
+// 自动备份：每 10 轮问答自动保存
+const origSend = window.sendMessage;
+if (typeof sendMessage === 'function') {
+  const _send = sendMessage;
+  window.sendMessage = async function() {
+    await _send.apply(this, arguments);
+    const msgs = getSession("chat_messages", []);
+    if (msgs.length > 0 && msgs.length % 10 === 0) {
+      const backups = getStorage("auto_backups", []);
+      backups.push({ messages: msgs.slice(), time: new Date().toISOString() });
+      if (backups.length > 5) backups.shift();
+      setStorage("auto_backups", backups);
+    }
+  };
+}
+// 关闭前提示
+window.addEventListener("beforeunload", function(e) {
+  const msgs = getSession("chat_messages", []);
+  if (msgs.length > 0) {
+    e.preventDefault();
+    e.returnValue = "对话将在关闭后丢失，是否已下载报告？";
+  }
+});
+</script>
+</body>
+</html>
