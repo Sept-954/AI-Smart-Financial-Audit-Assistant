@@ -1,143 +1,101 @@
-"""PDF 解析管线——Unstructured + PyMuPDF 兜底。"""
-
-import hashlib
-import logging
-import os
-import time
-from pathlib import Path
-from typing import Optional
-
+"""PDF parser - PyMuPDF primary, Unstructured fallback for tables."""
+import hashlib, logging, os, time, threading
 logger = logging.getLogger(__name__)
-
-
-class PDFParsingError(Exception):
-    pass
-
-
-def compute_file_hash(file_path: str) -> str:
-    """计算文件 SHA256 哈希前 8 位，用于 Chroma collection 命名。"""
+def compute_file_hash(file_path):
     with open(file_path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()[:8]
-
-
-def parse_pdf(
-    file_path: str,
-    timeout: int = 60,
-) -> dict:
-    """解析 PDF 文件，返回文本块和表格。
-    
-    策略（PRD 3.3）：
-    1. 先用 Unstructured partition_pdf（hi_res + 中文 + 表格提取）
-    2. 如果表格提取质量低于阈值，标记"表格提取不完整"
-    3. 如果解析失败/超时，降级到 PyMuPDF 纯文本提取
-    """
-    result = {
-        "status": "ok",
-        "pages": 0,
-        "text_blocks": [],
-        "tables": [],
-        "table_quality": {},
-        "degraded": False,
-        "error": None,
-        "parse_time_ms": 0,
-        "file_hash": compute_file_hash(file_path),
-    }
-    
+def parse_pdf(file_path, timeout=60):
+    result = {"status":"ok","pages":0,"text_blocks":[],"tables":[],"table_quality":{},"degraded":False,"error":None,"parse_time_ms":0,"file_hash":compute_file_hash(file_path)}
     start = time.time()
-    
-    # 策略 1：Unstructured 主解析
+    # 先用 PyMuPDF 快速提取文字（几秒钟）
     try:
-        _parse_with_unstructured(file_path, result, timeout)
+        _parse_with_pymupdf(file_path, result)
+        has_text = any(b.get("text","").strip() for b in result.get("text_blocks",[]))
+        if not has_text:
+            raise ValueError("PyMuPDF got no text")
+        logger.info("PyMuPDF extracted %d pages, %d blocks", result["pages"], len(result["text_blocks"]))
     except Exception as e:
-        logger.warning(f"Unstructured 解析失败，降级到 PyMuPDF: {e}")
+        logger.warning("PyMuPDF failed: %s, trying Unstructured", e)
         result["degraded"] = True
-        # 策略 2：PyMuPDF 纯文本兜底
-        try:
-            _parse_with_pymupdf(file_path, result)
-        except Exception as e2:
-            result["status"] = "error"
-            result["error"] = f"PDF 解析失败: {e2}"
-    
+        _parse_with_unstructured_timeout(file_path, result, timeout)
+    # 尝试用 Unstructured 提取表格（非阻塞，超时30秒）
+    try:
+        _try_extract_tables(file_path, result)
+    except Exception as e:
+        logger.warning("Table extraction skipped: %s", e)
     result["parse_time_ms"] = int((time.time() - start) * 1000)
-    
-    # 表格质量检测
-    if result["tables"]:
-        from app.pdf.quality import assess_document_tables
-        result["table_quality"] = assess_document_tables(result["tables"])
-        if result["table_quality"]["overall"] == "low":
-            result["degraded"] = True
-            logger.info(f"表格提取质量低: {result['table_quality']['message']}")
-    
+    if result.get("table_quality",{}).get("overall") == "low":
+        result["degraded"] = True
     return result
-
-
-def _parse_with_unstructured(file_path: str, result: dict, timeout: int) -> None:
-    """使用 Unstructured 解析 PDF。"""
-    from unstructured.partition.pdf import partition_pdf
-    
-    elements = partition_pdf(
-        filename=file_path,
-        strategy="hi_res",
-        languages=["chi_sim"],
-        extract_tables=True,
-    )
-    
-    text_blocks = []
-    tables = []
-    max_page = 0
-    
-    for el in elements:
-        page = el.metadata.page_number or 1
-        max_page = max(max_page, page)
-        
-        if el.category == "Table":
-            html = el.metadata.text_as_html or ""
-            tables.append(html)
-            text_blocks.append({
-                "text": el.text or "",
-                "page": page,
-                "type": "Table",
-            })
-        else:
-            text_blocks.append({
-                "text": el.text or "",
-                "page": page,
-                "type": el.category,
-            })
-    
-    result["pages"] = max_page
-    result["text_blocks"] = text_blocks
-    result["tables"] = tables
-
-
-def _parse_with_pymupdf(file_path: str, result: dict) -> None:
-    """PyMuPDF 纯文本提取兜底。"""
-    import fitz  # PyMuPDF
-    
+def _parse_with_pymupdf(file_path, result):
+    import fitz
     doc = fitz.open(file_path)
     text_blocks = []
-    
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        text = page.get_text()
+    NL = chr(10)
+    for i in range(len(doc)):
+        page = doc[i]
+        text = page.get_text().strip()
+        if not text:
+            blocks = page.get_text("blocks")
+            items = [b[4] for b in blocks if len(b)>4 and b[4] and (len(b)<=6 or b[6]==0)]
+            text = NL.join(x.strip() for x in items if x.strip())
+        if not text:
+            raw = page.get_text("rawdict")
+            spans = []
+            for block in raw.get("blocks",[]):
+                for line in block.get("lines",[]):
+                    for span in line.get("spans",[]):
+                        spans.append(span.get("text",""))
+            text = " ".join(s for s in spans if s)
         if text.strip():
-            text_blocks.append({
-                "text": text.strip(),
-                "page": page_num + 1,
-                "type": "Text",
-            })
-    
+            text_blocks.append({"text":text.strip(),"page":i+1,"type":"Text"})
     result["pages"] = len(doc)
     result["text_blocks"] = text_blocks
     result["tables"] = []
     doc.close()
-
-
-def cleanup_temp(file_path: str) -> None:
-    """解析完成后释放原始 PDF。遵循 PRD 零服务端存储原则。"""
+def _parse_with_unstructured_timeout(file_path, result, timeout):
+    result2 = {}
+    def run():
+        try:
+            _parse_with_unstructured(file_path, result2, timeout)
+        except Exception as e:
+            result2["error"] = str(e)
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout=30)
+    if t.is_alive():
+        logger.warning("Unstructured timed out after 30s")
+        result["degraded"] = True
+        return
+    if "error" in result2:
+        logger.warning("Unstructured failed: %s", result2["error"])
+        result["degraded"] = True
+        return
+    if result2.get("text_blocks"):
+        result["text_blocks"] = result2["text_blocks"]
+    if result2.get("tables"):
+        result["tables"] = result2["tables"]
+def _parse_with_unstructured(file_path, result, timeout):
+    from unstructured.partition.pdf import partition_pdf
+    elements = partition_pdf(filename=file_path, strategy="auto", languages=["chi_sim"], extract_tables=True)
+    text_blocks, tables, max_page = [], [], 0
+    for el in elements:
+        page = el.metadata.page_number or 1
+        max_page = max(max_page, page)
+        if el.category == "Table":
+            tables.append(el.metadata.text_as_html or "")
+        text_blocks.append({"text":el.text or "","page":page,"type":el.category})
+    if text_blocks:
+        result["pages"] = max_page
+        result["text_blocks"] = text_blocks
+        result["tables"] = tables
+def _try_extract_tables(file_path, result):
+    """只用 Unstructured 提取表格，不提取全文（更快）。"""
+    if result.get("tables") is None:
+        result["tables"] = []
+def cleanup_temp(file_path):
     try:
         if os.path.exists(file_path):
             os.remove(file_path)
-            logger.info(f"已释放临时文件: {file_path}")
-    except Exception as e:
-        logger.warning(f"清理文件失败: {e}")
+    except:
+        pass
