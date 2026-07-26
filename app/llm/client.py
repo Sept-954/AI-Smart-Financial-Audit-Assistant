@@ -67,7 +67,13 @@ class LLMClient:
                 yield chunk.choices[0].delta.content
     
     def test_connection(self) -> tuple[bool, str]:
-        """测试 API 连通性。参考 PRD US-07：设置页连通性测试。"""
+        """测试 API 连通性。"""
+        import httpx
+        url = str(self.client.base_url if hasattr(self.client, "base_url") else "")
+        try:
+            httpx.get(url.rstrip("/"), timeout=5)
+        except Exception as net_err:
+            return False, "[网络诊断] API地址不可达: " + url + " | " + str(net_err)[:120]
         try:
             self.client.chat.completions.create(
                 model=self.model,
